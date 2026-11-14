@@ -15,12 +15,16 @@ PSM::PSM(unsigned char sensePin, unsigned char controlPin, unsigned int range, i
 
   uint8_t interruptNum = digitalPinToInterrupt(PSM::_sensePin);
 
+  updateControl(/*disable=*/true);
+
   if (interruptNum != NOT_AN_INTERRUPT) {
     attachInterrupt(interruptNum, onInterrupt, mode);
   }
 
   PSM::_range = range;
   PSM::_interruptMinTimeDiff = interruptMinTimeDiff;
+
+  //initTimer(1500);
 }
 
 void onPSMInterrupt() __attribute__((weak));
@@ -34,28 +38,21 @@ void PSM::onInterrupt() {
 
   onPSMInterrupt();
 
-  if (_thePSM->_dividerCounter >= _thePSM->_divider - 1) {
-    _thePSM->_dividerCounter -= _thePSM->_divider - 1;
+  _thePSM->_dividerCounter++;
+  _thePSM->_dividerCounter %= _thePSM->_divider;
+
+  if (_thePSM->_dividerCounter == 0) {
     _thePSM->calculateSkip();
-  } else {
-    _thePSM->_dividerCounter++;
   }
+}
+
+void PSM::onTimerInterrupt() {
+  timerStop(_thePSM->_psmIntervalTimer);
+  _thePSM->updateControl(/*disable=*/true);
 }
 
 void PSM::set(unsigned int value) {
-  if (value < PSM::_range) {
-    PSM::_value = value;
-  } else {
-    PSM::_value = PSM::_range;
-  }
-}
-
-long PSM::getCounter() {
-  return PSM::_counter;
-}
-
-void PSM::resetCounter() {
-  PSM::_counter = 0;
+  PSM::_value = value < PSM::_range ? value : PSM::_range;
 }
 
 void PSM::stopAfter(long counter) {
@@ -63,40 +60,33 @@ void PSM::stopAfter(long counter) {
 }
 
 void PSM::calculateSkip() {
-  PSM::_lastMillis = millis();
-
   PSM::_a += PSM::_value;
 
+  bool skip = true;
+  
   if (PSM::_a >= PSM::_range) {
     PSM::_a -= PSM::_range;
-    PSM::_skip = false;
-  } else {
-    PSM::_skip = true;
+    skip = false; 
+    
   }
 
-  if (PSM::_a > PSM::_range) {
-    PSM::_a = 0;
-    PSM::_skip = false;
-  }
-
-  if (!PSM::_skip) {
-    PSM::_counter++;
-  }
-
-  if (!PSM::_skip
-    && PSM::_stopAfter > 0
-    && PSM::_counter > PSM::_stopAfter) {
-    PSM::_skip = true;
-  }
-
-  updateControl();
+  updateControl(skip);
 }
 
-void PSM::updateControl() {
-  if (PSM::_skip) {
+void PSM::updateControl(bool disable) {
+  if (disable) {
     digitalWrite(PSM::_controlPin, LOW);
   } else {
     digitalWrite(PSM::_controlPin, HIGH);
+
+    if (_thePSM->_psmIntervalTimerInitialized) {
+      timerRestart(_thePSM->_psmIntervalTimer);      // counter = 0
+      timerAlarmEnable(_thePSM->_psmIntervalTimer);  // <-- re-arm; hardware cleared it on last fire
+      timerStart(_thePSM->_psmIntervalTimer);        // resume the paused counter
+    }
+    else {
+      initTimer(1000);
+    }
   }
 }
 
@@ -123,21 +113,17 @@ unsigned int PSM::cps() {
   PSM::_a = 0;
   PSM::_divider = divider;
 
+  //ESP_LOGI(LOG_TAG, "inner CPS: %d", result);
+
   return result;
 }
 
-unsigned long PSM::getLastMillis() {
-  return PSM::_lastMillis;
-}
+void PSM::initTimer(uint16_t delay) {
+  uint32_t us = delay;
+  _psmIntervalTimer = timerBegin(0, 80, true);
+  timerAttachInterrupt(_psmIntervalTimer, onTimerInterrupt, false);
+  timerAlarmWrite(_psmIntervalTimer, us, true);
+  timerAlarmEnable(_psmIntervalTimer);
 
-unsigned char PSM::getDivider(void) {
-  return PSM::_divider;
-}
-
-void PSM::setDivider(unsigned char divider) {
-  PSM::_divider = divider > 0 ? divider : 1;
-}
-
-void PSM::shiftDividerCounter(char value) {
-  PSM::_dividerCounter += value;
+  PSM::_psmIntervalTimerInitialized = true;
 }
